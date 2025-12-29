@@ -89,11 +89,20 @@ func run(cfg Config) error {
 		}
 
 		src := filepath.Join(cfg.WorkDir, name)
-		dst := filepath.Join(
-			cfg.WorkDir,
-			outputDir,
-			strings.TrimSuffix(name, filepath.Ext(name))+".webp",
-		)
+
+		var dst string
+		if cfg.Replace {
+			dst = filepath.Join(
+				cfg.WorkDir,
+				strings.TrimSuffix(name, filepath.Ext(name))+".webp",
+			)
+		} else {
+			dst = filepath.Join(
+				cfg.WorkDir,
+				outputDir,
+				strings.TrimSuffix(name, filepath.Ext(name))+".webp",
+			)
+		}
 
 		jobs = append(jobs, Job{Source: src, Dest: dst})
 	}
@@ -102,8 +111,10 @@ func run(cfg Config) error {
 		return fmt.Errorf("nenhum arquivo elegível para conversão encontrado")
 	}
 
-	if err := os.MkdirAll(filepath.Join(cfg.WorkDir, outputDir), 0755); err != nil {
-		return fmt.Errorf("falha ao criar pasta de saída")
+	if !cfg.Replace {
+		if err := os.MkdirAll(filepath.Join(cfg.WorkDir, outputDir), 0755); err != nil {
+			return fmt.Errorf("falha ao criar pasta de saída")
+		}
 	}
 
 	if !cfg.Skip {
@@ -118,7 +129,7 @@ func run(cfg Config) error {
 			fmt.Printf(
 				"  %s → %s\n",
 				filepath.Base(j.Source),
-				filepath.Join(outputDir, filepath.Base(j.Dest)),
+				filepath.Base(j.Dest),
 			)
 		}
 
@@ -187,7 +198,7 @@ func worker(jobs <-chan Job, wg *sync.WaitGroup, cfg Config, stats *Stats) {
 		fmt.Printf(
 			"%s → %s\n",
 			filepath.Base(job.Source),
-			filepath.Join(outputDir, filepath.Base(job.Dest)),
+			filepath.Base(job.Dest),
 		)
 
 		atomic.AddInt64(&stats.Converted, 1)
@@ -240,7 +251,7 @@ func parseArgs() (Config, error) {
 			i++
 		case "-s", "-skip":
 			cfg.Skip = true
-		case "-replace":
+		case "-replace", "-r":
 			cfg.Replace = true
 		default:
 			rest = append(rest, args[i])
