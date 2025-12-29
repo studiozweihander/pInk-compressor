@@ -3,372 +3,345 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"flag"
 	"fmt"
-	_ "image/gif"
-	_ "image/jpeg"
-	_ "image/png"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
-type ImageJob struct {
-	SourcePath string
-	DestPath   string
-	OrigSize   int64
+const (
+	outputDir  = "compressed"
+	asciiColor = "\033[38;5;212m"
+	resetColor = "\033[0m"
+	separator  = "────────────────────────────────────────────────────────────"
+)
+
+type Config struct {
+	WorkDir string
+	Quality int
+	Skip    bool
+	Replace bool
 }
 
-type ConversionResult struct {
-	SourcePath string
-	DestPath   string
-	OrigSize   int64
-	NewSize    int64
-	Success    bool
-	Error      error
+type Job struct {
+	Source string
+	Dest   string
 }
 
 type Stats struct {
-	TotalFiles     int
-	ProcessedFiles int
-	OriginalSize   int64
-	ConvertedSize  int64
-	FailedFiles    int
+	Total      int64
+	Converted  int64
+	Failed     int64
+	SizeBefore int64
+	SizeAfter  int64
 }
 
-const (
-	outputDir = "compressed"
-)
-
-var (
-	quality     int
-	skip        bool
-	ffmpegMutex sync.Mutex
-)
+var ffmpegMutex sync.Mutex
 
 func main() {
-	fmt.Println(`
-		█████            █████
-          ░░███            ░░███
- ████████  ░███  ████████   ░███ █████     ██████   ██████  █████████████   ████████  ████████   ██████   █████   █████   ██████  ████████
-░░███░░███ ░███ ░░███░░███  ░███░░███     ███░░███ ███░░███░░███░░███░░███ ░░███░░███░░███░░███ ███░░███ ███░░   ███░░   ███░░███░░███░░███
- ░███ ░███ ░███  ░███ ░███  ░██████░     ░███ ░░░ ░███ ░███ ░███ ░███ ░███  ░███ ░███ ░███ ░░░ ░███████ ░░█████ ░░█████ ░███ ░███ ░███ ░░░
- ░███ ░███ ░███  ░███ ░███  ░███░░███    ░███  ███░███ ░███ ░███ ░███ ░███  ░███ ░███ ░███     ░███░░░   ░░░░███ ░░░░███░███ ░███ ░███
- ░███████  █████ ████ █████ ████ █████   ░░██████ ░░██████  █████░███ █████ ░███████  █████    ░░██████  ██████  ██████ ░░██████  █████
- ░███░░░  ░░░░░ ░░░░ ░░░░░ ░░░░ ░░░░░     ░░░░░░   ░░░░░░  ░░░░░ ░░░ ░░░░░  ░███░░░  ░░░░░      ░░░░░░  ░░░░░░  ░░░░░░   ░░░░░░  ░░░░░
- ░███                                                                       ░███
- █████                                                                      █████
-░░░░░                                                                      ░░░░░                                                           `)
+	printASCII()
 
-	flag.IntVar(&quality, "quality", 80, "Qualidade da compressão (1-100)")
-	flag.IntVar(&quality, "q", 80, "Qualidade da compressão (1-100)")
-	flag.BoolVar(&skip, "skip", false, "Executar sem preview")
-	flag.BoolVar(&skip, "s", false, "Executar sem preview")
-	flag.Parse()
-
-	if quality < 1 || quality > 100 {
-		logError("Qualidade deve estar entre 1 e 100")
-		os.Exit(1)
-	}
-
-	args := flag.Args()
-	if len(args) == 0 {
-		logError("Uso: go run compressor.go <pasta> [flags]")
-		os.Exit(1)
-	}
-
-	inputDir := args[0]
-	if inputDir == "." {
-		var err error
-		inputDir, err = os.Getwd()
-		if err != nil {
-			logError(fmt.Sprintf("Erro ao obter diretório atual: %v", err))
-			os.Exit(1)
-		}
-	}
-
-	if _, err := os.Stat(inputDir); os.IsNotExist(err) {
-		logError(fmt.Sprintf("Diretório não encontrado: %s", inputDir))
-		os.Exit(1)
-	}
-
-	outputPath := filepath.Join(inputDir, outputDir)
-
-	images, err := scanImages(inputDir)
+	cfg, err := parseArgs()
 	if err != nil {
-		logError(fmt.Sprintf("Erro ao escanear imagens: %v", err))
-		os.Exit(1)
-	}
-
-	if len(images) == 0 {
-		logInfo("Nenhuma imagem encontrada (PNG, JPEG, JPG, GIF)")
-		return
-	}
-
-	logInfo(fmt.Sprintf("Encontradas %d imagens para processar", len(images)))
-	logInfo(fmt.Sprintf("Qualidade: %d%%", quality))
-	fmt.Println()
-
-	if !skip {
-		showPreview(images, outputPath)
-		if !confirmExecution() {
-			logInfo("Operação cancelada pelo usuário")
-			return
-		}
 		fmt.Println()
-	}
-
-	if err := os.MkdirAll(outputPath, 0755); err != nil {
-		logError(fmt.Sprintf("Erro ao criar pasta de saída: %v", err))
+		logError("%v", err)
 		os.Exit(1)
 	}
 
-	jobs := make(chan ImageJob, len(images))
-	results := make(chan ConversionResult, len(images))
+	if err := run(cfg); err != nil {
+		fmt.Println()
+		logError("%v", err)
+		os.Exit(1)
+	}
+}
 
-	var wg sync.WaitGroup
-	workers := runtime.NumCPU()
+func run(cfg Config) error {
+	logInfo("Diretório de trabalho: %s", cfg.WorkDir)
 
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go worker(jobs, results, &wg)
+	if !hasCommand("ffmpeg") {
+		return fmt.Errorf("ffmpeg não encontrado no sistema")
 	}
 
-	for _, imgPath := range images {
-		info, err := os.Stat(imgPath)
-		if err != nil {
+	entries, err := os.ReadDir(cfg.WorkDir)
+	if err != nil {
+		return fmt.Errorf("falha ao ler diretório")
+	}
+
+	var jobs []Job
+
+	for _, e := range entries {
+		if e.IsDir() {
 			continue
 		}
 
-		filename := filepath.Base(imgPath)
-		nameWithoutExt := strings.TrimSuffix(filename, filepath.Ext(filename))
-		destPath := filepath.Join(outputPath, nameWithoutExt+".webp")
-
-		jobs <- ImageJob{
-			SourcePath: imgPath,
-			DestPath:   destPath,
-			OrigSize:   info.Size(),
+		name := e.Name()
+		if strings.HasPrefix(name, ".") {
+			continue
 		}
-	}
-	close(jobs)
 
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
-	stats := Stats{TotalFiles: len(images)}
-
-	for result := range results {
-		if result.Success {
-			stats.ProcessedFiles++
-			stats.OriginalSize += result.OrigSize
-			stats.ConvertedSize += result.NewSize
-
-			reduction := float64(result.OrigSize-result.NewSize) / float64(result.OrigSize) * 100
-
-			logSuccess(fmt.Sprintf("%s (%s) → %s (%s) [%.1f%% redução]",
-				filepath.Base(result.SourcePath),
-				formatSize(result.OrigSize),
-				filepath.Base(result.DestPath),
-				formatSize(result.NewSize),
-				reduction,
-			))
-		} else {
-			stats.FailedFiles++
-			logError(fmt.Sprintf("%s: %v", filepath.Base(result.SourcePath), result.Error))
+		if !isImage(name) {
+			continue
 		}
+
+		src := filepath.Join(cfg.WorkDir, name)
+		dst := filepath.Join(
+			cfg.WorkDir,
+			outputDir,
+			strings.TrimSuffix(name, filepath.Ext(name))+".webp",
+		)
+
+		jobs = append(jobs, Job{Source: src, Dest: dst})
 	}
+
+	if len(jobs) == 0 {
+		return fmt.Errorf("nenhum arquivo elegível para conversão encontrado")
+	}
+
+	if err := os.MkdirAll(filepath.Join(cfg.WorkDir, outputDir), 0755); err != nil {
+		return fmt.Errorf("falha ao criar pasta de saída")
+	}
+
+	if !cfg.Skip {
+		fmt.Println()
+		fmt.Println(separator)
+		fmt.Println()
+
+		logInfo("Preview dos arquivos que serão convertidos")
+		fmt.Println()
+
+		for _, j := range jobs {
+			fmt.Printf(
+				"  %s → %s\n",
+				filepath.Base(j.Source),
+				filepath.Join(outputDir, filepath.Base(j.Dest)),
+			)
+		}
+
+		fmt.Println()
+		if !confirmExecution() {
+			logInfo("Operação cancelada pelo usuário")
+			return nil
+		}
+
+		fmt.Println()
+		fmt.Println(separator)
+		fmt.Println()
+	}
+
+	var stats Stats
+	workers := runtime.NumCPU()
+	jobCh := make(chan Job, len(jobs))
+	var wg sync.WaitGroup
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go worker(jobCh, &wg, cfg, &stats)
+	}
+
+	for _, j := range jobs {
+		jobCh <- j
+	}
+	close(jobCh)
+
+	wg.Wait()
 
 	fmt.Println()
-	printSummary(stats)
+	printStats(stats)
+
+	fmt.Println()
+	logSuccess("Processo finalizado com sucesso.")
+
+	return nil
 }
 
-func worker(jobs <-chan ImageJob, results chan<- ConversionResult, wg *sync.WaitGroup) {
+func worker(jobs <-chan Job, wg *sync.WaitGroup, cfg Config, stats *Stats) {
 	defer wg.Done()
 
 	for job := range jobs {
-		result := ConversionResult{
-			SourcePath: job.SourcePath,
-			DestPath:   job.DestPath,
-			OrigSize:   job.OrigSize,
+		atomic.AddInt64(&stats.Total, 1)
+
+		if info, err := os.Stat(job.Source); err == nil {
+			atomic.AddInt64(&stats.SizeBefore, info.Size())
 		}
 
-		newSize, err := convertToWebP(job.SourcePath, job.DestPath, quality)
-		if err != nil {
-			result.Success = false
-			result.Error = err
-		} else {
-			result.Success = true
-			result.NewSize = newSize
+		if err := convert(job.Source, job.Dest, cfg.Quality); err != nil {
+			fmt.Println()
+			logError("erro ao converter %s", filepath.Base(job.Source))
+			atomic.AddInt64(&stats.Failed, 1)
+			continue
 		}
 
-		results <- result
+		if info, err := os.Stat(job.Dest); err == nil {
+			atomic.AddInt64(&stats.SizeAfter, info.Size())
+		}
+
+		if cfg.Replace {
+			_ = os.Remove(job.Source)
+		}
+
+		fmt.Printf(
+			"%s → %s\n",
+			filepath.Base(job.Source),
+			filepath.Join(outputDir, filepath.Base(job.Dest)),
+		)
+
+		atomic.AddInt64(&stats.Converted, 1)
 	}
 }
 
-func checkFFmpeg() bool {
-	cmd := exec.Command("ffmpeg", "-version")
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-	err := cmd.Run()
-
-	if err != nil {
-		cmd = exec.Command("where", "ffmpeg")
-		if cmd.Run() != nil {
-			return false
-		}
-	}
-
-	return true
-}
-
-func convertToWebP(sourcePath, destPath string, quality int) (int64, error) {
+func convert(src, dst string, quality int) error {
 	ffmpegMutex.Lock()
 	defer ffmpegMutex.Unlock()
 
-	cmd := exec.Command("ffmpeg",
-		"-i", sourcePath,
-		"-c:v", "libwebp",
-		"-quality", fmt.Sprintf("%d", quality),
+	cmd := exec.Command(
+		"ffmpeg",
 		"-y",
-		destPath,
+		"-i", src,
+		"-qscale", strconv.Itoa(quality),
+		dst,
 	)
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return 0, fmt.Errorf("ffmpeg error: %v - %s", err, stderr.String())
+		if stderr.Len() > 0 {
+			return fmt.Errorf("%s", strings.TrimSpace(stderr.String()))
+		}
+		return err
 	}
 
-	info, err := os.Stat(destPath)
-	if err != nil {
-		return 0, err
-	}
-
-	return info.Size(), nil
+	return nil
 }
 
-func scanImages(dir string) ([]string, error) {
-	var images []string
-	validExts := map[string]bool{
-		".png":  true,
-		".jpg":  true,
-		".jpeg": true,
-		".gif":  true,
-	}
+func parseArgs() (Config, error) {
+	var cfg Config
+	cfg.Quality = 80
 
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
+	args := os.Args[1:]
+	var rest []string
 
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-q", "-quality":
+			if i+1 >= len(args) {
+				return cfg, fmt.Errorf("qualidade inválida")
+			}
+			v, err := strconv.Atoi(args[i+1])
+			if err != nil || v < 1 || v > 100 {
+				return cfg, fmt.Errorf("qualidade deve estar entre 1 e 100")
+			}
+			cfg.Quality = v
+			i++
+		case "-s", "-skip":
+			cfg.Skip = true
+		case "-replace":
+			cfg.Replace = true
+		default:
+			rest = append(rest, args[i])
 		}
-
-		ext := strings.ToLower(filepath.Ext(entry.Name()))
-		if validExts[ext] {
-			images = append(images, filepath.Join(dir, entry.Name()))
-		}
 	}
 
-	return images, nil
-}
-
-func showPreview(images []string, outputPath string) {
-	fmt.Println(strings.Repeat("─", 80))
-	logInfo("PREVIEW - Arquivos que serão convertidos:")
-	fmt.Println()
-
-	var totalSize int64
-
-	for _, imgPath := range images {
-		info, err := os.Stat(imgPath)
+	if len(rest) > 0 {
+		abs, err := filepath.Abs(rest[0])
 		if err != nil {
-			continue
+			return cfg, fmt.Errorf("diretório inválido")
 		}
-
-		filename := filepath.Base(imgPath)
-		nameWithoutExt := strings.TrimSuffix(filename, filepath.Ext(filename))
-		destFilename := nameWithoutExt + ".webp"
-
-		totalSize += info.Size()
-
-		fmt.Printf("  %s (%s) → %s\n",
-			filename,
-			formatSize(info.Size()),
-			destFilename,
-		)
+		info, err := os.Stat(abs)
+		if err != nil || !info.IsDir() {
+			return cfg, fmt.Errorf("diretório não encontrado: %s", abs)
+		}
+		cfg.WorkDir = abs
+	} else {
+		dir, err := os.Getwd()
+		if err != nil {
+			return cfg, fmt.Errorf("falha ao obter diretório atual")
+		}
+		cfg.WorkDir = dir
 	}
 
-	fmt.Println()
-	logInfo(fmt.Sprintf("Pasta de destino: %s", outputPath))
-	logInfo(fmt.Sprintf("Tamanho total: %s", formatSize(totalSize)))
-	fmt.Println(strings.Repeat("─", 80))
+	return cfg, nil
 }
 
 func confirmExecution() bool {
 	reader := bufio.NewReader(os.Stdin)
-	fmt.Print("\nDeseja continuar? (S/n): ")
+	fmt.Print("Deseja continuar? (s/N): ")
 
-	response, err := reader.ReadString('\n')
+	resp, err := reader.ReadString('\n')
 	if err != nil {
 		return false
 	}
 
-	response = strings.TrimSpace(strings.ToLower(response))
-	return response == "" || response == "s" || response == "sim"
+	resp = strings.TrimSpace(strings.ToLower(resp))
+	return resp == "s" || resp == "sim"
 }
 
-func formatSize(bytes int64) string {
-	const unit = 1024
-	if bytes < unit {
-		return fmt.Sprintf("%d B", bytes)
+func isImage(name string) bool {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".png", ".jpg", ".jpeg", ".gif":
+		return true
+	default:
+		return false
 	}
-	div, exp := int64(unit), 0
-	for n := bytes / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
-func logInfo(msg string) {
-	fmt.Printf("\033[36m[INFO]\033[0m %s\n", msg)
+func hasCommand(cmd string) bool {
+	_, err := exec.LookPath(cmd)
+	return err == nil
 }
 
-func logSuccess(msg string) {
-	fmt.Printf("\033[32m[✓]\033[0m %s\n", msg)
-}
+func printStats(s Stats) {
+	logInfo("Convertidos: %d", s.Converted)
 
-func logError(msg string) {
-	fmt.Printf("\033[31m[✗]\033[0m %s\n", msg)
-}
-
-func printSummary(stats Stats) {
-	fmt.Println(strings.Repeat("─", 80))
-	logInfo(fmt.Sprintf("Total de arquivos: %d", stats.TotalFiles))
-	logSuccess(fmt.Sprintf("Processados: %d", stats.ProcessedFiles))
-
-	if stats.FailedFiles > 0 {
-		logError(fmt.Sprintf("Falhas: %d", stats.FailedFiles))
+	if s.Failed > 0 {
+		logInfo("Falhas: %d", s.Failed)
 	}
 
-	if stats.ProcessedFiles > 0 {
-		reduction := float64(stats.OriginalSize-stats.ConvertedSize) / float64(stats.OriginalSize) * 100
-		fmt.Printf("\033[36m[STATS]\033[0m Tamanho original: %s → Convertido: %s (%.1f%% redução)\n",
-			formatSize(stats.OriginalSize),
-			formatSize(stats.ConvertedSize),
-			reduction,
-		)
-	}
+	logInfo("Tamanho antes: %.2f MB", bytesToMB(s.SizeBefore))
+	logInfo("Tamanho depois: %.2f MB", bytesToMB(s.SizeAfter))
 
-	fmt.Println(strings.Repeat("─", 80))
+	if s.SizeBefore > 0 {
+		reduction := float64(s.SizeBefore-s.SizeAfter) / float64(s.SizeBefore) * 100
+		logInfo("Redução total: %.2f%%", reduction)
+	}
+}
+
+func bytesToMB(b int64) float64 {
+	return float64(b) / 1024 / 1024
+}
+
+func printASCII() {
+	fmt.Print(asciiColor)
+	fmt.Print(`
+           █████            █████                                                                                                          
+          ░░███            ░░███                                                                                                           
+ ████████  ░███  ████████   ░███ █████     ██████   ██████  █████████████   ████████  ████████   ██████   █████   █████   ██████  ████████ 
+░░███░░███ ░███ ░░███░░███  ░███░░███     ███░░███ ███░░███░░███░░███░░███ ░░███░░███░░███░░███ ███░░███ ███░░   ███░░   ███░░███░░███░░███
+ ░███ ░███ ░███  ░███ ░███  ░██████░     ░███ ░░░ ░███ ░███ ░███ ░███ ░███  ░███ ░███ ░███ ░░░ ░███████ ░░█████ ░░█████ ░███ ░███ ░███ ░░░ 
+ ░███ ░███ ░███  ░███ ░███  ░███░░███    ░███  ███░███ ░███ ░███ ░███ ░███  ░███ ░███ ░███     ░███░░░   ░░░░███ ░░░░███░███ ░███ ░███     
+ ░███████  █████ ████ █████ ████ █████   ░░██████ ░░██████  █████░███ █████ ░███████  █████    ░░██████  ██████  ██████ ░░██████  █████    
+ ░███░░░  ░░░░░ ░░░░ ░░░░░ ░░░░ ░░░░░     ░░░░░░   ░░░░░░  ░░░░░ ░░░ ░░░░░  ░███░░░  ░░░░░      ░░░░░░  ░░░░░░  ░░░░░░   ░░░░░░  ░░░░░     
+ ░███                                                                       ░███                                                           
+ █████                                                                      █████                                                          
+░░░░░                                                                      ░░░░░                                                           
+
+`)
+	fmt.Print(resetColor)
+}
+
+func logInfo(msg string, args ...any) {
+	fmt.Printf("\033[34m[INFO]\033[0m "+msg+"\n", args...)
+}
+
+func logSuccess(msg string, args ...any) {
+	fmt.Printf("\033[32m[SUCCESS]\033[0m "+msg+"\n", args...)
+}
+
+func logError(msg string, args ...any) {
+	fmt.Printf("\033[31m[ERROR]\033[0m "+msg+"\n", args...)
 }
