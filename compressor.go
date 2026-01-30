@@ -69,7 +69,7 @@ func run(cfg Config) error {
 
 	entries, err := os.ReadDir(cfg.WorkDir)
 	if err != nil {
-		return fmt.Errorf("falha ao ler diretório")
+		return fmt.Errorf("Falha ao ler diretório")
 	}
 
 	var jobs []Job
@@ -108,12 +108,12 @@ func run(cfg Config) error {
 	}
 
 	if len(jobs) == 0 {
-		return fmt.Errorf("nenhum arquivo elegível para conversão encontrado")
+		return fmt.Errorf("Nenhum arquivo elegível para conversão encontrado")
 	}
 
 	if !cfg.Replace {
 		if err := os.MkdirAll(filepath.Join(cfg.WorkDir, outputDir), 0755); err != nil {
-			return fmt.Errorf("falha ao criar pasta de saída")
+			return fmt.Errorf("Falha ao criar pasta de saída")
 		}
 	}
 
@@ -182,7 +182,7 @@ func worker(jobs <-chan Job, wg *sync.WaitGroup, cfg Config, stats *Stats) {
 
 		if err := convert(job.Source, job.Dest, cfg.Quality); err != nil {
 			fmt.Println()
-			logError("erro ao converter %s", filepath.Base(job.Source))
+			logError("Erro ao converter %s", filepath.Base(job.Source))
 			atomic.AddInt64(&stats.Failed, 1)
 			continue
 		}
@@ -241,11 +241,11 @@ func parseArgs() (Config, error) {
 		switch args[i] {
 		case "-q", "-quality":
 			if i+1 >= len(args) {
-				return cfg, fmt.Errorf("qualidade inválida")
+				return cfg, fmt.Errorf("Qualidade inválida")
 			}
 			v, err := strconv.Atoi(args[i+1])
 			if err != nil || v < 1 || v > 100 {
-				return cfg, fmt.Errorf("qualidade deve estar entre 1 e 100")
+				return cfg, fmt.Errorf("Qualidade deve estar entre 1 e 100")
 			}
 			cfg.Quality = v
 			i++
@@ -261,17 +261,17 @@ func parseArgs() (Config, error) {
 	if len(rest) > 0 {
 		abs, err := filepath.Abs(rest[0])
 		if err != nil {
-			return cfg, fmt.Errorf("diretório inválido")
+			return cfg, fmt.Errorf("Diretório inválido")
 		}
 		info, err := os.Stat(abs)
 		if err != nil || !info.IsDir() {
-			return cfg, fmt.Errorf("diretório não encontrado: %s", abs)
+			return cfg, fmt.Errorf("Diretório não encontrado: %s", abs)
 		}
 		cfg.WorkDir = abs
 	} else {
 		dir, err := os.Getwd()
 		if err != nil {
-			return cfg, fmt.Errorf("falha ao obter diretório atual")
+			return cfg, fmt.Errorf("Falha ao obter diretório atual")
 		}
 		cfg.WorkDir = dir
 	}
