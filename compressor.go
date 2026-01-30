@@ -294,7 +294,7 @@ func confirmExecution() bool {
 
 func isImage(name string) bool {
 	switch strings.ToLower(filepath.Ext(name)) {
-	case ".png", ".jpg", ".jpeg", ".gif":
+	case ".png", ".jpg", ".jpeg", ".gif", ".avif":
 		return true
 	default:
 		return false
